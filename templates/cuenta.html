@@ -1,0 +1,44 @@
+{% extends 'base.html' %}
+{% block pestana %}Cuentas y accesos{% endblock %}
+{% block subtitulo %}Solo la administradora puede cambiar nombres, usuarios y contraseñas{% endblock %}
+{% block contenido %}
+<div class="aviso">Los cambios se guardan solo en este navegador, sin base de datos. En otro equipo se mantienen los usuarios y contraseñas originales. Para confirmar cualquier cambio se pide la contraseña actual de la administradora.</div>
+<div class="cuentas">
+  {% for c in cuentas_vista %}
+  {% set propio = form if abierta == c.rol else {} %}
+  <section class="tarjeta cuenta">
+    <div class="cuenta-cabecera">
+      <div class="avatar grande" aria-hidden="true">{{ c.nombre[:1]|upper }}</div>
+      <div>
+        <h2>{{ c.titulo }}</h2>
+        <p class="ayuda">{{ c.nombre }} · usuario <strong>{{ c.usuario }}</strong> · contraseña {{ 'personalizada' if c.clave_hash else 'original' }}</p>
+      </div>
+    </div>
+    <form method="post" action="{{ url_for('mi_cuenta') }}" class="formulario" novalidate>
+      <input type="hidden" name="cuenta" value="{{ c.rol }}">
+      <div class="campos">
+        <label>Nombre para mostrar
+          <input type="text" name="nombre" maxlength="40" required value="{{ propio.get('nombre', c.nombre) }}">
+        </label>
+        <label>Usuario
+          <input type="text" name="usuario" maxlength="20" required value="{{ propio.get('usuario', c.usuario) }}">
+        </label>
+        <label>Nueva contraseña
+          <input type="password" name="clave_nueva" autocomplete="new-password" placeholder="Vacía = no cambiar">
+        </label>
+        <label>Confirmar contraseña
+          <input type="password" name="clave_repetida" autocomplete="new-password">
+        </label>
+        <label class="completo">Contraseña actual de la administradora
+          <input type="password" name="clave_admin" required autocomplete="current-password">
+        </label>
+      </div>
+      <div class="botones">
+        <button class="boton" type="submit" name="accion" value="guardar">Guardar cambios</button>
+        <button class="boton secundario" type="submit" name="accion" value="restablecer">Restablecer originales</button>
+      </div>
+    </form>
+  </section>
+  {% endfor %}
+</div>
+{% endblock %}

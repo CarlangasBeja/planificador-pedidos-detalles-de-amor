@@ -1,0 +1,107 @@
+{% extends 'base.html' %}
+{% set nombres = {'nuevo': 'Nuevo pedido', 'analizar': 'Analizar plazo', 'pedidos': 'Mis pedidos', 'guia': 'Guía de producción'} %}
+{% block pestana %}{{ nombres[seccion] }}{% endblock %}
+{% block subtitulo %}Evalúe la fecha de entrega antes de aceptar un pedido{% endblock %}
+
+{% block contenido %}
+{% if seccion == 'nuevo' %}
+{% if not ev %}
+<section class="portada">
+  <div class="texto">
+    <span class="eyebrow">¡Hola! Bienvenido</span>
+    <h2>¿Llegamos a tiempo con <span>este pedido</span>?</h2>
+    <p>Escriba los datos del cliente y la aplicación le dirá si la fecha que pide es segura y cuál conviene ofrecer.</p>
+    <div class="chips">
+      <span class="chip">{{ m.icono('corazon') }} Fecha segura de entrega</span>
+      <span class="chip">{{ m.icono('curva') }} Probabilidad de cumplir</span>
+    </div>
+  </div>
+</section>
+{% endif %}
+<div class="dos-columnas">
+  {{ m.form_pedido(url_for('usuario_nuevo'), form or {}, cfg) }}
+  {% if ev %}<div>{{ m.resultado(ev, url_for('usuario_nuevo'), cfg) }}
+  <div class="tarjeta espacio"><h2>¿Qué tan segura es la fecha?</h2>
+    <p class="ayuda">El punto negro es la fecha que pide el cliente. La zona verde reúne las fechas recomendables.</p>
+    <div id="grafico" class="grafico"></div></div></div>
+  {% else %}
+  <div class="tarjeta pasos">
+    <h2>Cómo funciona</h2>
+    <ol>
+      <li>Escriba el cliente, la cantidad y la fecha en que quiere el pedido.</li>
+      <li>Indique cuánta tela hay disponible.</li>
+      <li>Pulse <strong>Evaluar pedido</strong> y revise la probabilidad de cumplir.</li>
+      <li>Guarde el pedido con la fecha solicitada o con la recomendada.</li>
+    </ol>
+  </div>
+  {% endif %}
+</div>
+
+{% elif seccion == 'analizar' %}
+{% if res %}
+<form class="barra" method="get" action="{{ url_for('usuario_analizar') }}" data-auto>
+  <label>Fecha de entrega a analizar <input type="date" name="fecha" min="{{ manana }}" value="{{ fecha.isoformat() }}"></label>
+  <button class="boton" type="submit">Analizar</button>
+</form>
+<div class="kpis">
+  {{ m.kpi('Probabilidad de cumplir', p|pct, 'para el ' ~ fecha|fecha) }}
+  <div class="kpi"><div class="etq">Evaluación</div><div class="val"><span class="etiqueta grande {{ veredicto[1] }}">{{ veredicto[0] }}</span></div>
+    <div class="sub">{{ disponibles }} jornadas disponibles</div></div>
+  {{ m.kpi('Fecha recomendada', fecha_rec|fecha, jornadas_rec ~ ' jornadas · ' ~ (cfg.confianza * 100)|int ~ ' % de seguridad') }}
+</div>
+<div class="dos-columnas">
+  <div class="tarjeta">
+    <h2>Curva de probabilidad</h2>
+    <p class="ayuda">Mientras más jornadas haya hasta la entrega, mayor es la probabilidad de cumplir. Desde la línea punteada ({{ (cfg.confianza * 100)|int }} %) la fecha es recomendable.</p>
+    <div id="grafico" class="grafico"></div>
+  </div>
+  <div class="tarjeta">
+    <h2>Probabilidad por fecha</h2>
+    <div class="tabla-cont plano">
+    <table class="tabla">
+      <thead><tr><th>Entrega</th><th>Jornadas</th><th>Prob.</th><th>Evaluación</th></tr></thead>
+      <tbody>
+      {% for t in tabla %}
+      <tr><td>{{ t.fecha|fecha }}</td><td>{{ t.jornadas }}</td><td>{{ t.p|pct }}</td>
+          <td><span class="etiqueta {{ t.veredicto[1] }}">{{ t.veredicto[0] }}</span></td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    </div>
+  </div>
+</div>
+{% endif %}
+
+{% elif seccion == 'pedidos' %}
+<h2>Mis pedidos</h2>
+{{ m.tabla_pedidos(pedidos, url_for('usuario_pedidos')) }}
+
+{% elif seccion == 'guia' %}
+{% if res %}
+<div class="kpis">
+  {{ m.kpi('Un pedido de dos docenas', (res.duracion / cfg.jornada)|f2(1) ~ ' jornadas', res.duracion|f2 ~ ' horas de trabajo en promedio') }}
+  {{ m.kpi('Plazo seguro', (res.plazo_para(cfg.confianza) / cfg.jornada)|round(0, 'ceil')|int ~ ' jornadas', 'para cumplir con ' ~ (cfg.confianza * 100)|int ~ ' % de seguridad') }}
+</div>
+<h3>Orden de trabajo</h3>
+<ol class="guia">
+  {% for f in res.filas|sort(attribute='ES') %}
+  <li class="{{ 'critica' if f.critica }}">
+    <div><strong>{{ f.nombre }}</strong><span class="ayuda"> · unas {{ f.te|f2(1) }} h</span></div>
+    {% if f.critica %}<span class="etiqueta mal">No puede retrasarse</span>
+    {% else %}<span class="etiqueta ok">Tiene {{ f.holgura|f2(1) }} h de margen</span>{% endif %}
+  </li>
+  {% endfor %}
+</ol>
+<div class="tarjeta consejos">
+  <h3>Recomendaciones</h3>
+  <ul>
+    <li>La costura y el relleno son las tareas que más retrasan la entrega: deles prioridad.</li>
+    <li>El bordado y sublimado puede hacerse al mismo tiempo que la costura del cuerpo.</li>
+    <li>Revise que haya tela suficiente antes de aceptar un pedido.</li>
+  </ul>
+</div>
+{% else %}
+<div class="aviso error">El administrador debe revisar los datos del modelo.</div>
+{% endif %}
+{% endif %}
+{% endblock %}

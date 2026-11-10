@@ -1,0 +1,52 @@
+{% extends 'base.html' %}
+{% block pestana %}Iniciar sesión{% endblock %}
+{% block publico %}
+<div class="login-pagina">
+  <section class="login-hero" aria-label="Presentación de Detalles de Amor">
+    <figure class="postal">
+      <img src="{{ url_for('static', filename='img/ramo_peluche.jpg') }}" alt="Ramo con peluche de Detalles de Amor">
+      Detalles hechos a mano
+    </figure>
+    <span class="eyebrow">Aquí se planifica con amor:</span>
+    <h2>¡Ternura hecha a mano, entregada a tiempo!</h2>
+    <p>Calcule cuánto tarda cada pedido, conozca las tareas que no pueden retrasarse y ofrezca a sus clientes fechas de entrega seguras.</p>
+    <div class="chips">
+      <span class="chip">{{ m.icono('corazon') }} Fecha segura de entrega</span>
+      <span class="chip">{{ m.icono('curva') }} Probabilidad de cumplir</span>
+      <span class="chip">{{ m.icono('chispa') }} Hecho en Ambato</span>
+    </div>
+  </section>
+
+  <section class="login-lado">
+    <div class="corazones" aria-hidden="true">
+      <svg width="90" height="90" viewBox="0 0 24 24" style="top:12%;left:6%;transform:rotate(-14deg)"><path fill="currentColor" d="M12 21s-7.5-4.7-9.8-9.2C.6 8.6 2.4 4.5 6.3 4.5c2.2 0 3.6 1.2 4.4 2.6h2.6c.8-1.4 2.2-2.6 4.4-2.6 3.9 0 5.7 4.1 4.1 7.3C19.5 16.3 12 21 12 21z"/></svg>
+      <svg width="54" height="54" viewBox="0 0 24 24" style="top:62%;left:10%;transform:rotate(12deg)"><path fill="currentColor" d="M12 21s-7.5-4.7-9.8-9.2C.6 8.6 2.4 4.5 6.3 4.5c2.2 0 3.6 1.2 4.4 2.6h2.6c.8-1.4 2.2-2.6 4.4-2.6 3.9 0 5.7 4.1 4.1 7.3C19.5 16.3 12 21 12 21z"/></svg>
+      <svg width="120" height="120" viewBox="0 0 24 24" style="bottom:4%;right:4%;transform:rotate(-8deg)"><path fill="currentColor" d="M12 21s-7.5-4.7-9.8-9.2C.6 8.6 2.4 4.5 6.3 4.5c2.2 0 3.6 1.2 4.4 2.6h2.6c.8-1.4 2.2-2.6 4.4-2.6 3.9 0 5.7 4.1 4.1 7.3C19.5 16.3 12 21 12 21z"/></svg>
+      <svg width="40" height="40" viewBox="0 0 24 24" style="top:20%;right:12%;transform:rotate(18deg)"><path fill="currentColor" d="M12 21s-7.5-4.7-9.8-9.2C.6 8.6 2.4 4.5 6.3 4.5c2.2 0 3.6 1.2 4.4 2.6h2.6c.8-1.4 2.2-2.6 4.4-2.6 3.9 0 5.7 4.1 4.1 7.3C19.5 16.3 12 21 12 21z"/></svg>
+    </div>
+    <div class="arriba">{{ m.boton_tema() }}</div>
+    <div class="login-centro">
+      <div class="login-caja">
+        <span class="logo-badge">{{ m.logo(170, texto=True) }}</span>
+        <h1>¡Hola de nuevo!</h1>
+        <p class="sub">Ingrese con su usuario para planificar los pedidos</p>
+        {% with mensajes = get_flashed_messages(with_categories=true) %}
+          {% for tipo, texto in mensajes %}<div class="aviso {{ tipo }}" role="status">{{ texto }}</div>{% endfor %}
+        {% endwith %}
+        <form method="post" action="{{ url_for('login') }}" class="login-form">
+          <label>Usuario
+            <span class="campo-icono">{{ m.icono('usuario') }}<input type="text" name="usuario" autocomplete="username" required autofocus placeholder="Escriba su usuario"></span>
+          </label>
+          <label>Contraseña
+            <span class="campo-icono">{{ m.icono('candado') }}<input type="password" name="clave" id="clave" autocomplete="current-password" required placeholder="Escriba su contraseña">
+              <button type="button" class="ver-clave" data-ver-clave="clave" aria-label="Mostrar u ocultar la contraseña">{{ m.icono('ojo') }}</button></span>
+          </label>
+          <button class="boton ancho" type="submit">Ingresar</button>
+        </form>
+        <p class="login-nota">¿Olvidó su contraseña? Consulte con la administradora de la tienda.</p>
+      </div>
+    </div>
+    <p class="login-pie">© 2026 Detalles de Amor · Ambato – Ecuador</p>
+  </section>
+</div>
+{% endblock %}
