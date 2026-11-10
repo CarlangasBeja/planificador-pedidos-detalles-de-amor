@@ -1,0 +1,81 @@
+{% import '_macros.html' as m with context %}
+<!doctype html>
+<html lang="es" data-theme="claro">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block pestana %}Planificador de pedidos{% endblock %} · Detalles de Amor</title>
+  <link rel="icon" type="image/png" href="{{ url_for('static', filename='img/favicon.png') }}">
+  <link rel="preload" href="{{ url_for('static', filename='fuentes/fredoka-latin-600-normal.woff2') }}" as="font" type="font/woff2" crossorigin>
+  <link rel="preload" href="{{ url_for('static', filename='fuentes/nunito-latin-700-normal.woff2') }}" as="font" type="font/woff2" crossorigin>
+  <link rel="stylesheet" href="{{ url_for('static', filename='estilos.css') }}">
+  <script>
+    try {
+      var t = localStorage.getItem('dda_tema'); if (t) document.documentElement.dataset.theme = t;
+      if (localStorage.getItem('dda_menu') === 'cerrado' && window.innerWidth > 900) document.documentElement.classList.add('menu-cerrado');
+    } catch (e) {}
+  </script>
+</head>
+<body>
+<div class="anuncio" role="region" aria-label="Avisos">
+  <button type="button" data-anuncio="-1" aria-label="Aviso anterior">{{ m.icono('izq') }}</button>
+  <span class="anuncio-texto" id="anuncio">Campaña navideña 2026 · Peluche de Snoopy navideño</span>
+  <button type="button" data-anuncio="1" aria-label="Aviso siguiente">{{ m.icono('der') }}</button>
+</div>
+
+{% if sesion.get('rol') %}
+{% set rol = sesion.get('rol') %}
+<div class="app">
+  <aside class="menu" id="menu" aria-label="Menú principal">
+    <div class="menu-marca">
+      <span class="logo-mini">{{ m.logo(48) }}</span>
+      <div><div class="nombre">Detalles de Amor</div><small>Un pequeño regalo para el corazón</small></div>
+    </div>
+    <nav class="menu-nav">
+      <span class="menu-titulo">{{ 'Administración' if rol == 'admin' else 'Atención al cliente' }}</span>
+      {% for clave, nombre, icono in MENUS[rol] %}
+      <a href="{{ url_menu(rol, clave) }}" class="{{ 'activa' if clave == seccion }}" {% if clave == seccion %}aria-current="page"{% endif %}>
+        {{ m.icono(icono) }}<span>{{ nombre }}</span>
+      </a>
+      {% endfor %}
+    </nav>
+    <div class="menu-pie">
+      <div class="perfil">
+        <div class="avatar" aria-hidden="true">{{ sesion.get('nombre', '?')[:1]|upper }}</div>
+        <div><strong>{{ sesion.get('nombre') }}</strong><small>{{ 'Administradora' if rol == 'admin' else 'Usuario' }} · {{ sesion.get('usuario') }}</small></div>
+      </div>
+      <a class="menu-boton" href="{{ url_for('logout') }}">{{ m.icono('salir') }}<span>Cerrar sesión</span></a>
+    </div>
+  </aside>
+  <div class="velo" data-cerrar-menu></div>
+
+  <div class="principal">
+    <header class="barra-superior">
+      <button id="btn-menu" class="btn-menu" type="button" aria-label="Mostrar u ocultar el menú" aria-controls="menu">{{ m.icono('menu') }}</button>
+      <div class="titulos">
+        <h1>{% block titulo %}{{ self.pestana() }}{% endblock %}</h1>
+        <p>{% block subtitulo %}Peluche de Snoopy navideño · Método PERT-CPM{% endblock %}</p>
+      </div>
+      {{ m.boton_tema() }}
+    </header>
+    <main class="contenido">
+      {% with mensajes = get_flashed_messages(with_categories=true) %}
+        {% for tipo, texto in mensajes %}<div class="aviso {{ tipo }}" role="status">{{ texto }}</div>{% endfor %}
+      {% endwith %}
+      {% block contenido %}{% endblock %}
+    </main>
+    <footer class="pie">Detalles de Amor · Un pequeño regalo para el corazón · Ambato – Ecuador · Planificador PERT-CPM del Grupo 5, Investigación Operativa, Universidad Técnica de Ambato</footer>
+  </div>
+</div>
+{% else %}
+{% block publico %}{% endblock %}
+{% endif %}
+
+{% if figura %}
+<script type="application/json" id="figura">{{ figura|tojson }}</script>
+<script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
+<script>window.Plotly || document.write('<script src="{{ url_for('static', filename='vendor/plotly.min.js') }}"><\/script>');</script>
+{% endif %}
+<script src="{{ url_for('static', filename='app.js') }}"></script>
+</body>
+</html>

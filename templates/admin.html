@@ -1,0 +1,176 @@
+{% extends 'base.html' %}
+{% set nombres = {'resumen': 'Resumen', 'datos': 'Datos', 'red': 'Red', 'cronograma': 'Cronograma',
+                  'probabilidad': 'Probabilidad', 'pedidos': 'Pedidos', 'casos': 'Casos de prueba'} %}
+{% block pestana %}{{ nombres[seccion] }}{% endblock %}
+
+{% block contenido %}
+{% if seccion == 'resumen' and res %}
+<section class="portada">
+  <div class="texto">
+    <span class="eyebrow">Hola, {{ sesion.get('nombre', '').split(' ')[0] }}</span>
+    <h2>Planifica con amor, <span>entrega a tiempo</span></h2>
+    <p>Un pedido de dos docenas toma en promedio {{ (res.duracion / cfg.jornada)|f2(1) }} jornadas. Para cumplir con el {{ (cfg.confianza * 100)|int }} % de seguridad, ofrezca {{ jornadas_conf }} jornadas.</p>
+    <div class="chips">
+      <span class="chip">{{ m.icono('red') }} {{ res.filas|selectattr('critica')|list|length }} actividades críticas</span>
+      <span class="chip">{{ m.icono('chispa') }} Campaña navideña 2026</span>
+    </div>
+  </div>
+</section>
+{% endif %}
+<form class="barra" method="post" action="{{ url_for('cambiar_config') }}">
+  <input type="hidden" name="volver" value="{{ seccion }}">
+  <input type="hidden" name="qs" value="{{ request.query_string.decode() }}">
+  <label>Escenario
+    <select name="escenario">
+      {% for k, t in CASOS.items() %}<option value="{{ k }}" {% if k == cfg.escenario %}selected{% endif %}>{{ t }}</option>{% endfor %}
+    </select>
+  </label>
+  <label>Horas por jornada <input type="number" name="jornada" min="4" max="12" step="0.5" value="{{ cfg.jornada }}"></label>
+  <label>Confianza
+    <select name="confianza">
+      {% for n in NIVELES %}<option value="{{ n }}" {% if n == cfg.confianza %}selected{% endif %}>{{ (n * 100)|int }} %</option>{% endfor %}
+    </select>
+  </label>
+  <label>Tela por docena (m) <input type="number" name="consumo" min="0.1" step="0.1" value="{{ cfg.consumo }}"></label>
+  <button class="boton" type="submit">Aplicar</button>
+</form>
+
+{% if errores %}
+<div class="aviso error">
+  <strong>Revise los datos de entrada:</strong>
+  <ul>{% for e in errores %}<li>{{ e }}</li>{% endfor %}</ul>
+</div>
+{% endif %}
+
+{# ------------------------- RESUMEN ------------------------- #}
+{% if seccion == 'resumen' %}
+<div class="kpis">
+  {{ m.kpi('Duración esperada', res.duracion|f2 ~ ' h', (res.duracion / cfg.jornada)|f2(1) ~ ' jornadas') }}
+  {{ m.kpi('Desviación estándar', res.desviacion|f2 ~ ' h', 'Varianza ' ~ res.varianza|f2(3)) }}
+  {{ m.kpi('Plazo al ' ~ (cfg.confianza * 100)|int ~ ' %', plazo_conf|f2 ~ ' h', jornadas_conf ~ ' jornadas a ofrecer') }}
+  {{ m.kpi('Actividades críticas', res.filas|selectattr('critica')|list|length, 'de ' ~ res.filas|length ~ ' actividades') }}
+</div>
+<h3>Ruta crítica</h3>
+{% for r in res.rutas_criticas %}<div class="ruta">{{ r|join(' → ') }}</div>{% endfor %}
+{% if res.rutas_criticas|length > 1 %}<p class="ayuda">Hay varias rutas críticas; para la probabilidad se usa la de mayor varianza.</p>{% endif %}
+<h3>Tiempos y holguras por actividad</h3>
+<div class="tabla-cont">
+<table class="tabla numerica">
+  <thead><tr><th>Act.</th><th>Actividad</th><th>te (h)</th><th>σ²</th><th>ES</th><th>EF</th><th>LS</th><th>LF</th><th>Holgura (h)</th><th>Crítica</th></tr></thead>
+  <tbody>
+  {% for f in res.filas %}
+  <tr class="{{ 'critica' if f.critica }}">
+    <td>{{ f.id }}</td><td class="texto">{{ f.nombre }}</td><td>{{ f.te|f2 }}</td><td>{{ f.var|f2(3) }}</td>
+    <td>{{ f.ES|f2 }}</td><td>{{ f.EF|f2 }}</td><td>{{ f.LS|f2 }}</td><td>{{ f.LF|f2 }}</td>
+    <td>{{ f.holgura|f2 }}</td><td>{{ 'Sí' if f.critica else 'No' }}</td>
+  </tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+
+{# ------------------------- DATOS ------------------------- #}
+{% elif seccion == 'datos' %}
+<p>Modifique los tiempos o las precedencias y pulse <strong>Aplicar cambios</strong>. Las predecesoras se escriben con sus códigos separados por comas.</p>
+<form method="post" action="{{ url_for('admin', seccion='datos') }}">
+  <input type="hidden" name="filas" value="{{ datos|length }}">
+  <div class="tabla-cont">
+  <table class="tabla editable">
+    <thead><tr><th>Act.</th><th>Actividad</th><th>Predecesoras</th><th>Optimista (h)</th><th>Más probable (h)</th><th>Pesimista (h)</th><th>Quitar</th></tr></thead>
+    <tbody>
+    {% for a in datos %}
+    <tr>
+      <td><input name="id_{{ loop.index0 }}" value="{{ a.id }}" maxlength="4" class="corto" aria-label="Código"></td>
+      <td><input name="nombre_{{ loop.index0 }}" value="{{ a.nombre }}" maxlength="60" aria-label="Actividad"></td>
+      <td><input name="pred_{{ loop.index0 }}" value="{{ a.pred|join(', ') }}" class="medio" aria-label="Predecesoras"></td>
+      <td><input type="number" step="0.01" min="0" name="a_{{ loop.index0 }}" value="{{ a.a }}" class="medio" aria-label="Optimista"></td>
+      <td><input type="number" step="0.01" min="0" name="m_{{ loop.index0 }}" value="{{ a.m }}" class="medio" aria-label="Más probable"></td>
+      <td><input type="number" step="0.01" min="0" name="b_{{ loop.index0 }}" value="{{ a.b }}" class="medio" aria-label="Pesimista"></td>
+      <td class="centro"><input type="checkbox" name="eliminar_{{ loop.index0 }}" aria-label="Quitar actividad"></td>
+    </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  <div class="botones">
+    <button class="boton" name="accion" value="aplicar">Aplicar cambios</button>
+    <button class="boton secundario" name="accion" value="agregar">Agregar actividad</button>
+    <button class="boton secundario" name="accion" value="restaurar" formnovalidate>Restaurar datos del escenario</button>
+  </div>
+</form>
+
+{# ------------------------- RED ------------------------- #}
+{% elif seccion == 'red' %}
+<div class="tarjeta"><div id="grafico" class="grafico"></div></div>
+<p class="ayuda">Red de actividades en los nodos. En rojo, la ruta crítica. Pase el cursor sobre una actividad para ver sus tiempos.</p>
+
+{# ------------------------- CRONOGRAMA ------------------------- #}
+{% elif seccion == 'cronograma' %}
+<div class="tarjeta"><div id="grafico" class="grafico"></div></div>
+<p class="ayuda">Rojo: actividad crítica. Gris: actividad con holgura. La zona rayada es el margen disponible.</p>
+
+{# ------------------------- PROBABILIDAD ------------------------- #}
+{% elif seccion == 'probabilidad' %}
+{% set conf = (cfg.confianza * 100)|int %}
+<div class="dos-columnas">
+  <div>
+    <form class="tarjeta formulario" method="get" data-auto data-jornada="{{ cfg.jornada }}">
+      <h2>Plazo que pide el cliente</h2>
+      <div class="radios">
+        <label><input type="radio" name="unidad" value="jornadas" {% if unidad == 'jornadas' %}checked{% endif %}> Jornadas</label>
+        <label><input type="radio" name="unidad" value="horas" {% if unidad == 'horas' %}checked{% endif %}> Horas</label>
+      </div>
+      <label>{{ 'Número de jornadas' if unidad == 'jornadas' else 'Número de horas' }}
+        <input type="number" name="valor" min="0.5" max="400" step="0.5" value="{{ '%g'|format(valor) }}">
+      </label>
+      <div class="rapidos"><span class="ayuda">Pruebe con:</span>
+        {% for o in opciones %}<a class="chip-opcion {{ 'activa' if unidad == 'jornadas' and valor == o }}" href="?unidad=jornadas&valor={{ o }}">{{ o }} jornadas</a>{% endfor %}
+      </div>
+      <button class="boton" type="submit">Calcular</button>
+    </form>
+    <div class="kpis una">{{ m.kpi('Probabilidad de cumplir', p|pct, 'Plazo de ' ~ plazo|f2 ~ ' h (' ~ (plazo / cfg.jornada)|f2(1) ~ ' jornadas) · Z = ' ~ z|f2) }}</div>
+    {% if p >= cfg.confianza %}
+      <div class="decision ok">Plazo recomendable: se cumple con al menos el {{ conf }} % de seguridad.</div>
+    {% elif p >= 0.5 %}
+      <div class="decision mal">Plazo riesgoso: se cumple más de la mitad de las veces, pero no llega al {{ conf }} %. Ofrezca al menos {{ plazo_conf|f2 }} h ({{ jornadas_conf }} jornadas).</div>
+    {% else %}
+      <div class="decision mal">Plazo no recomendable. Un pedido necesita en promedio {{ media|f2(1) }} jornadas ({{ res.duracion|f2 }} h); ofrezca al menos {{ plazo_conf|f2 }} h ({{ jornadas_conf }} jornadas).</div>
+    {% endif %}
+  </div>
+  <div class="tarjeta">
+    <h2>Curva de probabilidad</h2>
+    <p class="ayuda">El punto rojo es el plazo evaluado. La zona verde reúne los plazos que cumplen la meta del {{ conf }} %.</p>
+    <div id="grafico" class="grafico"></div>
+  </div>
+</div>
+
+{# ------------------------- PEDIDOS ------------------------- #}
+{% elif seccion == 'pedidos' %}
+<div class="dos-columnas">
+  {{ m.form_pedido(url_for('admin', seccion='pedidos'), form or {}, cfg) }}
+  {% if ev %}<div>{{ m.resultado(ev, url_for('admin', seccion='pedidos'), cfg) }}
+  <div class="tarjeta espacio"><h2>Curva de probabilidad</h2><div id="grafico" class="grafico"></div></div></div>
+  {% else %}<div class="tarjeta vacio">Complete los datos y pulse <strong>Evaluar pedido</strong> para ver si la fecha es alcanzable.</div>{% endif %}
+</div>
+<h3>Pedidos registrados</h3>
+{{ m.tabla_pedidos(pedidos, url_for('admin', seccion='pedidos')) }}
+
+{# ------------------------- CASOS ------------------------- #}
+{% elif seccion == 'casos' %}
+<form class="barra" method="get">
+  <label>Plazo de referencia (horas) <input type="number" name="ref" min="8" max="120" step="1" value="{{ ref|int }}"></label>
+  <button class="boton" type="submit">Comparar</button>
+</form>
+<div class="tabla-cont">
+<table class="tabla numerica">
+  <thead><tr><th>Escenario</th><th>T (h)</th><th>σ (h)</th><th>P(≤ {{ ref|int }} h)</th><th>Plazo al {{ (cfg.confianza * 100)|int }} % (h)</th><th>Rutas críticas</th></tr></thead>
+  <tbody>
+  {% for c in casos %}
+  <tr><td class="texto">{{ c.titulo }}</td><td>{{ c.T|f2 }}</td><td>{{ c.sd|f2 }}</td><td>{{ (c.p * 100)|f2(1) }} %</td><td>{{ c.plazo|f2 }}</td><td>{{ c.rutas }}</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+<p class="ayuda">Los resultados coinciden con la solución manual del informe; las diferencias en el último decimal se deben al redondeo de Z en las tablas de la distribución normal.</p>
+{% endif %}
+{% endblock %}

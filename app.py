@@ -1,265 +1,571 @@
 """Planificador de pedidos · Detalles de Amor
-Aplicación web (Streamlit) para planificar pedidos con PERT-CPM.
-Ejecutar con:  streamlit run app.py
+Aplicación web en Flask (Python) con login de administrador y usuario.
+
+Local:   pip install -r requirements.txt  y luego  python app.py  → http://localhost:5000
+Vercel:  se publica con el archivo vercel.json incluido.
 """
 import math
+import os
+from datetime import datetime, timedelta, timezone
+from functools import wraps
 
-import pandas as pd
-import plotly.graph_objects as go
-import streamlit as st
-from statistics import NormalDist
+from flask import Flask, flash, make_response, redirect, render_template, request, session, url_for
+from itsdangerous import BadSignature, URLSafeSerializer
+from werkzeug.security import check_password_hash, generate_password_hash
 
-from pert_core import ACTIVIDADES_BASE, CASOS, caso, resolver, validar
+import graficos
+from pert_core import CASOS, caso, resolver, validar
 
-from marca import TEMAS, css, logo
+app = Flask(__name__)
+app.secret_key = os.environ.get("SECRET_KEY", "detalles-de-amor-grupo5-cambiar-en-produccion")
+app.config.update(SESSION_COOKIE_HTTPONLY=True, SESSION_COOKIE_SAMESITE="Lax",
+                  PERMANENT_SESSION_LIFETIME=timedelta(days=30))
+HORAS_SESION = 8  # el login vence a las 8 horas; los pedidos se conservan
 
-# ---------- tema claro / oscuro ----------
-MODO = "oscuro" if st.session_state.get("modo_oscuro", False) else "claro"
-C = TEMAS[MODO]
-if st._config.get_option("theme.backgroundColor") != C["streamlit"]["backgroundColor"]:
-    for opcion, valor in C["streamlit"].items():
-        st._config.set_option(f"theme.{opcion}", valor)
-    st.rerun()
+# ---------- Usuarios definidos en el código (sin base de datos) ----------
+USUARIOS = {
+    "admin": {"clave": os.environ.get("ADMIN_PASSWORD", "Admin2026"), "rol": "admin",
+              "nombre": "Alexandra Bucheli"},
+    "usuario": {"clave": os.environ.get("USER_PASSWORD", "Usuario2026"), "rol": "usuario",
+                "nombre": "Atención al cliente"},
+}
 
-CRITICA, NO_CRITICA, TINTA, SUAVE = C["rojo"], C["nocrit"], C["tinta"], C["suave"]
-
-st.set_page_config(page_title="Planificador de pedidos · Detalles de Amor", page_icon="❤️",
-                   layout="wide", initial_sidebar_state="auto")
-st.markdown(css(C), unsafe_allow_html=True)
-
-
-def kpis(items):
-    html = "".join(f'<div class="kpi"><div class="etq">{e}</div><div class="val">{v}</div>'
-                   f'<div class="sub">{s}</div></div>' for e, v, s in items)
-    st.markdown(f'<div class="kpis">{html}</div>', unsafe_allow_html=True)
+ZONA = timezone(timedelta(hours=-5))  # Ecuador continental
+CONFIG_INICIAL = {"escenario": "base", "jornada": 8.0, "confianza": 0.95, "consumo": 3.5}
+NIVELES = [0.80, 0.85, 0.90, 0.95, 0.99]
+MAX_PEDIDOS = 15
 
 
-def fmt(x, d=2):
+# ---------- Utilidades ----------
+def sesion_vigente():
+    inicio = session.get("inicio")
+    if session.get("rol") and inicio and datetime.now(ZONA).timestamp() - inicio < HORAS_SESION * 3600:
+        return True
+    for k in ("usuario", "rol", "nombre", "inicio"):
+        session.pop(k, None)
+    return False
+
+
+# ---------- Cuentas: cambios guardados solo en este navegador (cookie firmada) ----------
+COOKIE_CUENTAS = "dda_cuentas"
+
+
+def _firmador():
+    return URLSafeSerializer(app.secret_key, salt="cuentas-locales")
+
+
+def leer_cuentas():
+    try:
+        return _firmador().loads(request.cookies.get(COOKIE_CUENTAS, "")) or {}
+    except BadSignature:
+        return {}
+
+
+def cuenta(rol):
+    """Usuario y nombre vigentes del rol, con los cambios locales aplicados."""
+    base = next(k for k, v in USUARIOS.items() if v["rol"] == rol)
+    propio = leer_cuentas().get(rol, {})
+    return {"usuario": propio.get("u", base), "nombre": propio.get("n", USUARIOS[base]["nombre"]),
+            "clave_hash": propio.get("h"), "clave": USUARIOS[base]["clave"], "rol": rol}
+
+
+def verificar(usuario, clave):
+    for rol in ("admin", "usuario"):
+        c = cuenta(rol)
+        if usuario == c["usuario"]:
+            valida = check_password_hash(c["clave_hash"], clave) if c["clave_hash"] else clave == c["clave"]
+            return c if valida else None
+    return None
+
+
+def requiere(rol):
+    def decorador(vista):
+        @wraps(vista)
+        def envoltura(*args, **kwargs):
+            sesion_vigente()
+            if rol != "cualquiera" and session.get("rol") != rol or not session.get("rol"):
+                if session.get("rol"):
+                    return redirect(url_for("inicio"))
+                flash("Inicie sesión para continuar.", "aviso")
+                return redirect(url_for("login"))
+            return vista(*args, **kwargs)
+        return envoltura
+    return decorador
+
+
+def config():
+    return {**CONFIG_INICIAL, **session.get("config", {})}
+
+
+def datos_actuales():
+    cfg = config()
+    if session.get("datos") and session.get("datos_esc") == cfg["escenario"]:
+        return session["datos"]
+    return caso(cfg["escenario"])
+
+
+def calcular():
+    datos = datos_actuales()
+    errores = validar(datos)
+    return datos, errores, (None if errores else resolver(datos))
+
+
+def hoy():
+    return datetime.now(ZONA).date()
+
+
+def es_laborable(d):
+    return d.weekday() != 6  # se trabaja de lunes a sábado
+
+
+def jornadas_hasta(fecha):
+    """Jornadas laborables desde hoy (incluido) hasta la fecha de entrega (excluida)."""
+    d, n = hoy(), 0
+    while d < fecha:
+        n += es_laborable(d)
+        d += timedelta(days=1)
+    return n
+
+
+def fecha_tras(jornadas):
+    """Fecha de entrega luego de trabajar el número de jornadas indicado desde hoy."""
+    d, n = hoy(), 0
+    while n < jornadas:
+        n += es_laborable(d)
+        d += timedelta(days=1)
+    while not es_laborable(d):
+        d += timedelta(days=1)
+    return d
+
+
+def num(texto, defecto=None):
+    try:
+        return float(str(texto).replace(",", "."))
+    except (TypeError, ValueError):
+        return defecto
+
+
+def evaluar(res, cfg, form):
+    """Valida el formulario de pedido y devuelve (datos, errores)."""
+    errores = []
+    cliente = (form.get("cliente") or "").strip()[:40]
+    docenas = num(form.get("docenas"), 0)
+    tela = num(form.get("tela"))
+    try:
+        fecha = datetime.strptime(form.get("fecha", ""), "%Y-%m-%d").date()
+    except ValueError:
+        fecha = None
+    if not cliente:
+        errores.append("Ingrese el nombre del cliente.")
+    if not 0.5 <= docenas <= 2:
+        errores.append("La cantidad debe estar entre media y dos docenas.")
+    if fecha is None or fecha <= hoy():
+        errores.append("La fecha de entrega debe ser posterior a hoy.")
+    if tela is None or tela < 0:
+        errores.append("Ingrese los metros de tela disponibles.")
+    if errores:
+        return None, errores
+
+    disponibles = jornadas_hasta(fecha)
+    _, prob = res.probabilidad(disponibles * cfg["jornada"])
+    plazo_rec = res.plazo_para(cfg["confianza"])
+    jornadas_rec = math.ceil(plazo_rec / cfg["jornada"] - 1e-9)
+    falta = max(docenas * cfg["consumo"] - tela, 0.0)
+    acepta = prob >= cfg["confianza"] and falta == 0
+    return {
+        "cliente": cliente, "docenas": docenas, "fecha": fecha, "tela": tela, "disponibles": disponibles,
+        "prob": prob, "jornadas_rec": jornadas_rec, "fecha_rec": fecha_tras(jornadas_rec),
+        "falta": falta, "acepta": acepta,
+    }, []
+
+
+def guardar_pedido(ev, fecha):
+    pedidos = session.get("pedidos", [])
+    pedidos.insert(0, {"c": ev["cliente"], "d": ev["docenas"], "f": fecha.isoformat(),
+                       "p": round(ev["prob"], 4) if fecha == ev["fecha"] else None,
+                       "t": round(ev["falta"], 1), "e": "Pendiente", "r": hoy().isoformat()})
+    session["pedidos"] = pedidos[:MAX_PEDIDOS]
+
+
+MENUS = {
+    "admin": [("resumen", "Resumen", "resumen"), ("datos", "Datos", "datos"), ("red", "Red", "red"),
+              ("cronograma", "Cronograma", "cronograma"), ("probabilidad", "Probabilidad", "curva"),
+              ("pedidos", "Pedidos", "pedidos"), ("casos", "Casos de prueba", "casos"), ("cuenta", "Cuentas y accesos", "cuenta")],
+    "usuario": [("nuevo", "Nuevo pedido", "nuevo"), ("analizar", "Analizar plazo", "curva"),
+                ("pedidos", "Mis pedidos", "lista"), ("guia", "Guía de producción", "guia")],
+}
+
+
+def url_menu(rol, clave):
+    if clave == "cuenta":
+        return url_for("mi_cuenta")
+    if rol == "admin":
+        return url_for("admin", seccion=clave)
+    return url_for({"nuevo": "usuario_nuevo", "analizar": "usuario_analizar", "pedidos": "usuario_pedidos",
+                    "guia": "usuario_guia"}[clave])
+
+
+@app.context_processor
+def contexto():
+    return {"CASOS": CASOS, "NIVELES": NIVELES, "sesion": session, "hoy": hoy(), "MENUS": MENUS, "url_menu": url_menu,
+            "manana": (hoy() + timedelta(days=1)).isoformat()}
+
+
+@app.template_filter("f2")
+def f2(x, d=2):
     return f"{x:,.{d}f}".replace(",", " ")
 
 
-# ---------- barra lateral ----------
-with st.sidebar:
-    st.markdown(f'<div class="logo-lateral">{logo(C, 170, con_texto=True)}'
-                '<div class="sub">Peluches hechos a mano</div></div>', unsafe_allow_html=True)
-    st.markdown("### Configuración")
-    clave = st.selectbox("Escenario", list(CASOS), format_func=CASOS.get)
-    jornada = st.number_input("Horas por jornada", 4.0, 12.0, 8.0, 0.5)
-    confianza = st.select_slider("Nivel de confianza", [0.80, 0.85, 0.90, 0.95, 0.99], value=0.95,
-                                 format_func=lambda x: f"{x:.0%}")
-    st.caption("Tiempos en horas para un pedido de dos docenas. Datos levantados con la propietaria.")
+@app.template_filter("pct")
+def pct(p):
+    if p < 0.0005:
+        return "≈ 0 %"
+    if p > 0.9995:
+        return "≈ 100 %"
+    return f"{p * 100:.1f} %"
 
-if "datos" not in st.session_state or st.session_state.get("clave") != clave:
-    st.session_state.datos = caso(clave)
-    st.session_state.clave = clave
-if "pedidos" not in st.session_state:
-    st.session_state.pedidos = []
 
-cab1, cab2 = st.columns([5, 1.3], vertical_alignment="center")
-with cab1:
-    st.markdown(f'<div class="marca">{logo(C, 64)}<div><div class="nombre">Detalles de Amor</div>'
-                '<h1>Planificador de pedidos</h1>'
-                '<p>Peluche de Snoopy navideño · Método PERT-CPM</p></div></div>', unsafe_allow_html=True)
-with cab2:
-    st.toggle("Modo oscuro", value=MODO == "oscuro", key="tgl_oscuro",
-              help="Cambia la apariencia entre claro y oscuro",
-              on_change=lambda: st.session_state.update(modo_oscuro=st.session_state.tgl_oscuro))
-st.markdown('<div class="franja"></div>', unsafe_allow_html=True)
+@app.template_filter("fecha")
+def fecha_larga(d):
+    if isinstance(d, str):
+        d = datetime.strptime(d, "%Y-%m-%d").date()
+    dias = ["lunes", "martes", "miércoles", "jueves", "viernes", "sábado", "domingo"]
+    meses = ["enero", "febrero", "marzo", "abril", "mayo", "junio", "julio", "agosto", "septiembre",
+             "octubre", "noviembre", "diciembre"]
+    return f"{dias[d.weekday()]} {d.day} de {meses[d.month - 1]}"
 
-errores = validar(st.session_state.datos)
-if errores:
-    st.error("Revise los datos de entrada:\n\n" + "\n".join(f"- {e}" for e in errores))
-    st.stop()
 
-res = resolver(st.session_state.datos)
-plazo_conf = res.plazo_para(confianza)
-tabla = pd.DataFrame(res.filas)
+# ---------- Sesión ----------
+@app.route("/")
+def inicio():
+    sesion_vigente()
+    if session.get("rol") == "admin":
+        return redirect(url_for("admin", seccion="resumen"))
+    if session.get("rol") == "usuario":
+        return redirect(url_for("usuario_nuevo"))
+    return redirect(url_for("login"))
 
-tabs = st.tabs(["Resumen", "Datos", "Red", "Cronograma", "Probabilidad", "Pedidos", "Casos de prueba"])
 
-# ---------- Resumen ----------
-with tabs[0]:
-    kpis([
-        ("Duración esperada", f"{fmt(res.duracion)} h", f"{fmt(res.duracion / jornada, 1)} jornadas"),
-        ("Desviación estándar", f"{fmt(res.desviacion)} h", f"Varianza {fmt(res.varianza, 3)}"),
-        (f"Plazo al {confianza:.0%}", f"{fmt(plazo_conf)} h", f"{math.ceil(plazo_conf / jornada - 1e-9)} jornadas a ofrecer"),
-        ("Actividades críticas", str(int(tabla.critica.sum())), f"de {len(tabla)} actividades"),
-    ])
-    st.markdown("**Ruta crítica**")
-    for r in res.rutas_criticas:
-        st.markdown(f'<div class="ruta">{" → ".join(r)}</div>', unsafe_allow_html=True)
-    if len(res.rutas_criticas) > 1:
-        st.info("Existen varias rutas críticas. Para la probabilidad se usa la de mayor varianza.")
-    st.markdown("**Tiempos y holguras por actividad**")
-    vista = tabla[["id", "nombre", "te", "var", "ES", "EF", "LS", "LF", "holgura", "critica"]].rename(columns={
-        "id": "Act.", "nombre": "Actividad", "te": "te (h)", "var": "σ²", "holgura": "Holgura (h)", "critica": "Crítica"})
-    vista["Crítica"] = vista["Crítica"].map({True: "Sí", False: "No"})
-    st.dataframe(
-        vista.style.format({c: "{:.2f}" for c in ["te (h)", "ES", "EF", "LS", "LF", "Holgura (h)"]} | {"σ²": "{:.3f}"})
-        .apply(lambda f: [f"background-color: {C['rojo_fondo']}; color: {C['rojo_texto']}" if f["Crítica"] == "Sí" else "" for _ in f], axis=1),
-        hide_index=True, use_container_width=True)
+@app.route("/login", methods=["GET", "POST"])
+def login():
+    if request.method == "POST":
+        nombre = (request.form.get("usuario") or "").strip().lower()
+        c = verificar(nombre, request.form.get("clave", ""))
+        if c:
+            session.permanent = True
+            session.update(usuario=c["usuario"], rol=c["rol"], nombre=c["nombre"],
+                           inicio=datetime.now(ZONA).timestamp())
+            return redirect(url_for("inicio"))
+        flash("Usuario o contraseña incorrectos.", "error")
+    return render_template("login.html")
 
-# ---------- Datos ----------
-with tabs[1]:
-    st.markdown("Edite los tiempos o las precedencias y la planificación se recalcula al instante.")
-    editable = pd.DataFrame([{**a, "pred": ", ".join(a["pred"])} for a in st.session_state.datos])
-    editado = st.data_editor(
-        editable, hide_index=True, use_container_width=True, num_rows="dynamic", key=f"editor_{clave}",
-        column_config={
-            "id": st.column_config.TextColumn("Act.", width="small"),
-            "nombre": st.column_config.TextColumn("Actividad", width="large"),
-            "pred": st.column_config.TextColumn("Predecesoras", help="Códigos separados por coma"),
-            "a": st.column_config.NumberColumn("Optimista (h)", min_value=0.0, step=0.5),
-            "m": st.column_config.NumberColumn("Más probable (h)", min_value=0.0, step=0.5),
-            "b": st.column_config.NumberColumn("Pesimista (h)", min_value=0.0, step=0.5),
-        })
-    c1, c2 = st.columns([1, 1])
-    if c1.button("Aplicar cambios", type="primary", use_container_width=True):
-        nuevos = []
-        for _, f in editado.dropna(subset=["id"]).iterrows():
-            nuevos.append({"id": str(f["id"]).strip().upper(), "nombre": str(f["nombre"] or ""),
-                           "pred": [p.strip().upper() for p in str(f["pred"] or "").replace("—", "").split(",") if p.strip()],
-                           "a": float(f["a"] or 0), "m": float(f["m"] or 0), "b": float(f["b"] or 0)})
-        st.session_state.datos = nuevos
-        st.rerun()
-    if c2.button("Restaurar datos del escenario", use_container_width=True):
-        st.session_state.datos = caso(clave)
-        st.rerun()
 
-# ---------- Red ----------
-with tabs[2]:
-    nivel = {}
-    for f in res.filas:  # filas en orden topológico
-        preds = [p.strip() for p in f["pred"].split(",") if p.strip() and p.strip() != "—"]
-        nivel[f["id"]] = max((nivel[p] + 1 for p in preds), default=0)
-    columnas = {}
-    for k, n in nivel.items():
-        columnas.setdefault(n, []).append(k)
-    pos = {}
-    for n, ks in columnas.items():
-        for i, k in enumerate(ks):
-            pos[k] = (n, (len(ks) - 1) / 2 - i)
-    fig = go.Figure()
-    for f in res.filas:
-        for p in [p.strip() for p in f["pred"].split(",") if p.strip() and p.strip() != "—"]:
-            ambos = f["critica"] and tabla.set_index("id").loc[p, "critica"]
-            fig.add_annotation(x=pos[f["id"]][0], y=pos[f["id"]][1], ax=pos[p][0], ay=pos[p][1],
-                               xref="x", yref="y", axref="x", ayref="y", showarrow=True, arrowhead=3,
-                               arrowsize=1.2, arrowwidth=2.4 if ambos else 1.3, standoff=22, startstandoff=22,
-                               arrowcolor=CRITICA if ambos else C["flecha"])
-    fig.add_trace(go.Scatter(
-        x=[pos[f["id"]][0] for f in res.filas], y=[pos[f["id"]][1] for f in res.filas], mode="markers+text",
-        marker=dict(size=44, color=[C["rojo_fondo"] if f["critica"] else C["nocrit_fondo"] for f in res.filas],
-                    line=dict(width=2, color=[CRITICA if f["critica"] else NO_CRITICA for f in res.filas])),
-        text=[f"<b>{f['id']}</b>" for f in res.filas], textfont=dict(size=15, color=TINTA),
-        customdata=[[f["nombre"], f["te"], f["holgura"]] for f in res.filas],
-        hovertemplate="<b>%{text}</b> %{customdata[0]}<br>te = %{customdata[1]:.2f} h<br>Holgura = %{customdata[2]:.2f} h<extra></extra>"))
-    fig.update_layout(height=380, margin=dict(l=10, r=10, t=10, b=10), showlegend=False,
-                      xaxis=dict(visible=False), yaxis=dict(visible=False, scaleanchor=None),
-                      plot_bgcolor=C["fondo"], paper_bgcolor=C["fondo"], font=dict(color=TINTA))
-    st.plotly_chart(fig, use_container_width=True, config={"displaylogo": False})
-    st.caption("Red de actividades en los nodos (AON). Rojo: ruta crítica. Pase el cursor sobre una actividad para ver sus tiempos.")
+@app.route("/logout")
+def logout():
+    for k in ("usuario", "rol", "nombre", "inicio"):
+        session.pop(k, None)  # los pedidos se conservan en este navegador
+    flash("Sesión cerrada correctamente.", "ok")
+    return redirect(url_for("login"))
 
-# ---------- Cronograma ----------
-with tabs[3]:
-    orden = list(reversed(res.filas))
-    g = go.Figure()
-    g.add_trace(go.Bar(y=[f"{f['id']} · {f['nombre']}" for f in orden], x=[f["te"] for f in orden],
-                       base=[f["ES"] for f in orden], orientation="h", name="Duración esperada",
-                       marker_color=[CRITICA if f["critica"] else NO_CRITICA for f in orden],
-                       hovertemplate="Inicio %{base:.2f} h · duración %{x:.2f} h<extra></extra>"))
-    g.add_trace(go.Bar(y=[f"{f['id']} · {f['nombre']}" for f in orden], x=[f["holgura"] for f in orden],
-                       base=[f["EF"] for f in orden], orientation="h", name="Holgura",
-                       marker=dict(color=C["nocrit_fondo"], line=dict(color=NO_CRITICA, width=1),
-                                   pattern_shape="/", pattern_fgcolor=NO_CRITICA),
-                       hovertemplate="Holgura %{x:.2f} h<extra></extra>"))
-    g.add_vline(x=res.duracion, line_dash="dash", line_color=TINTA,
-                annotation_text=f"Fin esperado {fmt(res.duracion)} h", annotation_position="top left")
-    g.update_layout(barmode="overlay", height=460, margin=dict(l=10, r=10, t=30, b=10),
-                    xaxis_title="Horas desde el inicio del pedido", legend=dict(orientation="h", y=-0.15),
-                    plot_bgcolor=C["fondo"], paper_bgcolor=C["fondo"], font=dict(color=TINTA))
-    g.update_xaxes(gridcolor=C["rejilla"])
-    st.plotly_chart(g, use_container_width=True, config={"displaylogo": False})
-    st.caption("Rojo: actividad crítica. Gris: actividad con holgura. La zona rayada es el margen disponible.")
 
-# ---------- Probabilidad ----------
-with tabs[4]:
-    c1, c2 = st.columns([1, 2])
-    with c1:
-        unidad = st.radio("Expresar el plazo en", ["Jornadas", "Horas"], horizontal=True)
-        if unidad == "Jornadas":
-            dias = st.number_input("Plazo solicitado (jornadas)", 0.5, 30.0, 2.0, 0.5)
-            plazo = dias * jornada
-        else:
-            plazo = st.number_input("Plazo solicitado (horas)", 1.0, 240.0, 16.0, 1.0)
+# ---------- Administrador ----------
+SECCIONES_ADMIN = ["resumen", "datos", "red", "cronograma", "probabilidad", "pedidos", "casos"]
+
+
+@app.route("/admin/<seccion>", methods=["GET", "POST"])
+@requiere("admin")
+def admin(seccion):
+    if seccion not in SECCIONES_ADMIN:
+        return redirect(url_for("admin", seccion="resumen"))
+    cfg = config()
+    datos, errores, res = calcular()
+    ctx = {"seccion": seccion, "cfg": cfg, "datos": datos, "errores": errores, "res": res}
+
+    if seccion == "datos" and request.method == "POST":
+        return guardar_datos()
+    if res is None:
+        return render_template("admin.html", **{**ctx, "seccion": "datos" if seccion != "datos" else seccion})
+
+    ctx["plazo_conf"] = res.plazo_para(cfg["confianza"])
+    ctx["jornadas_conf"] = math.ceil(ctx["plazo_conf"] / cfg["jornada"] - 1e-9)
+
+    if seccion == "red":
+        ctx["figura"] = graficos.red(res)
+    elif seccion == "cronograma":
+        ctx["figura"] = graficos.gantt(res)
+    elif seccion == "probabilidad":
+        unidad = request.args.get("unidad", "jornadas")
+        if unidad not in ("jornadas", "horas"):
+            unidad = "jornadas"
+        valor = num(request.args.get("valor"), 6.0 if unidad == "jornadas" else 48.0)
+        valor = min(max(valor, 0.5), 400.0)
+        plazo = valor * cfg["jornada"] if unidad == "jornadas" else valor
         z, p = res.probabilidad(plazo)
-        kpis([("Probabilidad de cumplir", f"{p:.1%}", f"Z = {fmt(z)} · plazo {fmt(plazo)} h")])
-        if p >= confianza:
-            st.markdown('<div class="alerta-ok">El plazo puede aceptarse con el nivel de confianza elegido.</div>',
-                        unsafe_allow_html=True)
-        else:
-            st.markdown(f'<div class="alerta-mal">Plazo riesgoso. Se recomienda ofrecer al menos '
-                        f'{fmt(plazo_conf)} h ({math.ceil(plazo_conf / jornada - 1e-9)} jornadas).</div>',
-                        unsafe_allow_html=True)
-    with c2:
-        xs = [res.duracion + res.desviacion * (i / 20 - 4) for i in range(161)]
-        ys = [NormalDist(res.duracion, res.desviacion).cdf(x) for x in xs]
-        cur = go.Figure(go.Scatter(x=xs, y=ys, mode="lines", line=dict(color=CRITICA, width=2.5),
-                                   hovertemplate="%{x:.1f} h → %{y:.1%}<extra></extra>"))
-        cur.add_vline(x=plazo, line_color=TINTA, line_dash="dash",
-                      annotation_text=f"Plazo {fmt(plazo)} h", annotation_position="bottom right")
-        cur.add_hline(y=confianza, line_color=SUAVE, line_dash="dot",
-                      annotation_text=f"{confianza:.0%}", annotation_position="top left")
-        cur.update_layout(height=340, margin=dict(l=10, r=10, t=20, b=10), yaxis_tickformat=".0%",
-                          xaxis_title="Plazo (horas)", yaxis_title="Probabilidad de cumplir",
-                          plot_bgcolor=C["fondo"], paper_bgcolor=C["fondo"], font=dict(color=TINTA))
-        cur.update_xaxes(gridcolor=C["rejilla"]); cur.update_yaxes(gridcolor=C["rejilla"])
-        st.plotly_chart(cur, use_container_width=True, config={"displaylogo": False})
+        media = res.duracion / cfg["jornada"]
+        opciones = list(range(max(1, math.floor(media) - 1), ctx["jornadas_conf"] + 2))
+        ctx.update(unidad=unidad, valor=valor, plazo=plazo, z=z, p=p, media=media, opciones=opciones,
+                   figura=graficos.curva(res, plazo, cfg["confianza"]))
+    elif seccion == "pedidos":
+        if request.method == "POST":
+            return accion_pedido("admin")
+        ctx["pedidos"] = session.get("pedidos", [])
+    elif seccion == "casos":
+        ref = min(max(num(request.args.get("ref"), 48), 8), 120)
+        filas = []
+        for clave, titulo in CASOS.items():
+            r = resolver(caso(clave))
+            filas.append({"titulo": titulo, "T": r.duracion, "sd": r.desviacion,
+                          "p": r.probabilidad(ref)[1], "plazo": r.plazo_para(cfg["confianza"]),
+                          "rutas": len(r.rutas_criticas)})
+        ctx.update(ref=ref, casos=filas)
+    return render_template("admin.html", **ctx)
 
-# ---------- Pedidos ----------
-with tabs[5]:
-    st.markdown("Registre un pedido para saber, antes de aceptarlo, si el plazo es alcanzable y si la tela alcanza.")
-    with st.form("pedido", clear_on_submit=True):
-        c1, c2, c3 = st.columns(3)
-        cliente = c1.text_input("Cliente")
-        docenas = c2.number_input("Cantidad (docenas)", 0.5, 2.0, 2.0, 0.5,
-                                  help="Los tiempos están calibrados para pedidos de hasta dos docenas.")
-        dias = c3.number_input("Plazo solicitado (jornadas)", 0.5, 30.0, 2.0, 0.5)
-        c4, c5 = st.columns(2)
-        tela = c4.number_input("Tela disponible (m)", 0.0, 500.0, 6.0, 0.5)
-        consumo = c5.number_input("Consumo de tela por docena (m)", 0.1, 50.0, 3.5, 0.1)
-        enviado = st.form_submit_button("Evaluar pedido", type="primary", use_container_width=True)
-    if enviado:
-        if not cliente.strip():
-            st.warning("Ingrese el nombre del cliente.")
-        else:
-            _, p = res.probabilidad(dias * jornada)
-            falta = max(docenas * consumo - tela, 0)
-            st.session_state.pedidos.append({
-                "Cliente": cliente.strip(), "Docenas": docenas, "Plazo pedido (jornadas)": dias,
-                "Prob. de cumplir": f"{p:.1%}", "Plazo recomendado (jornadas)": math.ceil(plazo_conf / jornada - 1e-9),
-                "Tela": "Suficiente" if falta == 0 else f"Faltan {fmt(falta, 1)} m",
-                "Decisión": "Aceptar" if p >= confianza and falta == 0 else "Negociar plazo / comprar tela"})
-    if st.session_state.pedidos:
-        st.dataframe(pd.DataFrame(st.session_state.pedidos), hide_index=True, use_container_width=True)
-    else:
-        st.caption("Aún no hay pedidos registrados en esta sesión.")
 
-# ---------- Casos de prueba ----------
-with tabs[6]:
-    plazo_ref = st.slider("Plazo de referencia para comparar (horas)", 8, 72, 48, 1)
+def guardar_datos():
+    accion = request.form.get("accion", "aplicar")
+    cfg = config()
+    if accion == "restaurar":
+        session.pop("datos", None)
+        flash("Se restauraron los datos del escenario.", "ok")
+        return redirect(url_for("admin", seccion="datos"))
     filas = []
-    for k, nombre in CASOS.items():
-        r = resolver(caso(k))
-        z, p = r.probabilidad(plazo_ref)
-        filas.append({"Escenario": nombre, "T (h)": r.duracion, "σ (h)": r.desviacion,
-                      f"P(≤ {plazo_ref} h)": p, f"Plazo al {confianza:.0%} (h)": r.plazo_para(confianza),
-                      "Rutas críticas": len(r.rutas_criticas)})
-    st.dataframe(pd.DataFrame(filas).style.format({"T (h)": "{:.2f}", "σ (h)": "{:.2f}",
-                 f"P(≤ {plazo_ref} h)": "{:.1%}", f"Plazo al {confianza:.0%} (h)": "{:.2f}"}),
-                 hide_index=True, use_container_width=True)
-    st.caption("Los resultados coinciden con la solución manual del informe; las diferencias en el último "
-               "decimal se deben al redondeo de Z en las tablas de la distribución normal.")
+    total = int(num(request.form.get("filas"), 0) or 0)
+    for i in range(min(total, 40)):
+        if request.form.get(f"eliminar_{i}"):
+            continue
+        codigo = (request.form.get(f"id_{i}") or "").strip().upper()[:4]
+        if not codigo:
+            continue
+        preds = [p.strip().upper() for p in (request.form.get(f"pred_{i}") or "").replace("—", "").split(",") if p.strip()]
+        filas.append({"id": codigo, "nombre": (request.form.get(f"nombre_{i}") or "").strip()[:60],
+                      "pred": preds, "a": num(request.form.get(f"a_{i}"), -1),
+                      "m": num(request.form.get(f"m_{i}"), -1), "b": num(request.form.get(f"b_{i}"), -1)})
+    if accion == "agregar":
+        filas.append({"id": "", "nombre": "", "pred": [], "a": 0.0, "m": 0.0, "b": 0.0})
+        return render_template("admin.html", seccion="datos", cfg=cfg, datos=filas, errores=[], res=None,
+                               editando=True)
+    errores = validar(filas)
+    if errores:
+        return render_template("admin.html", seccion="datos", cfg=cfg, datos=filas, errores=errores, res=None,
+                               editando=True)
+    session["datos"], session["datos_esc"] = filas, cfg["escenario"]
+    flash("Cambios aplicados. La planificación se recalculó.", "ok")
+    return redirect(url_for("admin", seccion="datos"))
 
-st.markdown("<div class='pie'>Detalles de Amor · Planificador de pedidos con PERT-CPM · Proyecto de "
-            "Investigación Operativa, Universidad Técnica de Ambato</div>", unsafe_allow_html=True)
+
+@app.route("/config", methods=["POST"])
+@requiere("admin")
+def cambiar_config():
+    cfg = config()
+    escenario = request.form.get("escenario", cfg["escenario"])
+    if escenario in CASOS and escenario != cfg["escenario"]:
+        cfg["escenario"] = escenario
+        session.pop("datos", None)
+    cfg["jornada"] = min(max(num(request.form.get("jornada"), cfg["jornada"]), 4), 12)
+    conf = num(request.form.get("confianza"), cfg["confianza"])
+    cfg["confianza"] = conf if conf in NIVELES else cfg["confianza"]
+    cfg["consumo"] = min(max(num(request.form.get("consumo"), cfg["consumo"]), 0.1), 50)
+    session["config"] = cfg
+    destino = request.form.get("volver", "resumen")
+    qs = request.form.get("qs", "")
+    qs = qs if all(ch.isalnum() or ch in "=&._-%" for ch in qs) else ""
+    url = url_for("admin", seccion=destino if destino in SECCIONES_ADMIN else "resumen")
+    flash("Configuración aplicada.", "ok")
+    return redirect(url + ("?" + qs if qs else ""))
+
+
+# ---------- Pedidos (compartido) ----------
+def accion_pedido(rol):
+    cfg = config()
+    _, errores_modelo, res = calcular()
+    vista = "admin" if rol == "admin" else "usuario"
+    destino = url_for("admin", seccion="pedidos") if rol == "admin" else url_for("usuario_nuevo")
+    accion = request.form.get("accion", "evaluar")
+
+    if accion in ("entregado", "eliminar"):
+        i = int(num(request.form.get("indice"), -1))
+        pedidos = session.get("pedidos", [])
+        if 0 <= i < len(pedidos):
+            if accion == "eliminar":
+                pedidos.pop(i)
+                flash("Pedido eliminado.", "ok")
+            else:
+                pedidos[i]["e"] = "Entregado"
+                flash("Pedido marcado como entregado.", "ok")
+            session["pedidos"] = pedidos
+        return redirect(url_for("admin", seccion="pedidos") if rol == "admin" else url_for("usuario_pedidos"))
+
+    if res is None:
+        flash("Los datos del modelo tienen errores; el administrador debe corregirlos.", "error")
+        return redirect(destino)
+    ev, errores = evaluar(res, cfg, request.form)
+    if errores:
+        for e in errores:
+            flash(e, "error")
+        ctx = {"cfg": cfg, "form": request.form, "res": res}
+        if vista == "admin":
+            return render_template("admin.html", seccion="pedidos", datos=None, errores=[],
+                                   pedidos=session.get("pedidos", []), **ctx)
+        return render_template("usuario.html", seccion="nuevo", **ctx)
+
+    if accion == "guardar_solicitada":
+        guardar_pedido(ev, ev["fecha"])
+        flash(f"Pedido de {ev['cliente']} guardado para el {fecha_larga(ev['fecha'])}.", "ok")
+        return redirect(url_for("admin", seccion="pedidos") if rol == "admin" else url_for("usuario_pedidos"))
+    if accion == "guardar_recomendada":
+        guardar_pedido(ev, ev["fecha_rec"])
+        flash(f"Pedido de {ev['cliente']} guardado para el {fecha_larga(ev['fecha_rec'])}.", "ok")
+        return redirect(url_for("admin", seccion="pedidos") if rol == "admin" else url_for("usuario_pedidos"))
+
+    ctx = {"cfg": cfg, "form": request.form, "ev": ev, "res": res,
+           "figura": graficos.curva_jornadas(res, cfg, ev["disponibles"], ev["jornadas_rec"])}
+    if vista == "admin":
+        return render_template("admin.html", seccion="pedidos", datos=None, errores=[],
+                               pedidos=session.get("pedidos", []), **ctx)
+    return render_template("usuario.html", seccion="nuevo", **ctx)
+
+
+# ---------- Usuario ----------
+@app.route("/usuario/nuevo", methods=["GET", "POST"])
+@requiere("usuario")
+def usuario_nuevo():
+    if request.method == "POST":
+        return accion_pedido("usuario")
+    _, _, res = calcular()
+    return render_template("usuario.html", seccion="nuevo", cfg=config(), form={}, res=res)
+
+
+@app.route("/usuario/pedidos", methods=["GET", "POST"])
+@requiere("usuario")
+def usuario_pedidos():
+    if request.method == "POST":
+        return accion_pedido("usuario")
+    return render_template("usuario.html", seccion="pedidos", cfg=config(), pedidos=session.get("pedidos", []))
+
+
+@app.route("/usuario/guia")
+@requiere("usuario")
+def usuario_guia():
+    _, _, res = calcular()
+    return render_template("usuario.html", seccion="guia", cfg=config(), res=res)
+
+
+def veredicto(p, confianza):
+    if p >= confianza:
+        return "Recomendable", "ok"
+    if p >= 0.5:
+        return "Riesgoso", "riesgo"
+    return "No recomendable", "mal"
+
+
+@app.template_global()
+def veredicto_global(p, confianza):
+    return veredicto(p, confianza)
+
+
+@app.route("/usuario/analizar")
+@requiere("usuario")
+def usuario_analizar():
+    cfg = config()
+    _, _, res = calcular()
+    if res is None:
+        flash("El administrador debe revisar los datos del modelo.", "error")
+        return render_template("usuario.html", seccion="analizar", cfg=cfg, res=None)
+    plazo_rec = res.plazo_para(cfg["confianza"])
+    jornadas_rec = math.ceil(plazo_rec / cfg["jornada"] - 1e-9)
+    try:
+        fecha = datetime.strptime(request.args.get("fecha", ""), "%Y-%m-%d").date()
+    except ValueError:
+        fecha = hoy() + timedelta(days=7)
+    if fecha <= hoy():
+        flash("Elija una fecha posterior a hoy.", "error")
+        fecha = hoy() + timedelta(days=1)
+    disponibles = jornadas_hasta(fecha)
+    p = res.probabilidad(disponibles * cfg["jornada"])[1]
+    tabla, n = [], max(1, jornadas_rec - 4)
+    for j in range(n, n + 9):
+        pj = res.probabilidad(j * cfg["jornada"])[1]
+        tabla.append({"fecha": fecha_tras(j), "jornadas": j, "p": pj, "veredicto": veredicto(pj, cfg["confianza"])})
+    return render_template("usuario.html", seccion="analizar", cfg=cfg, res=res, fecha=fecha,
+                           disponibles=disponibles, p=p, veredicto=veredicto(p, cfg["confianza"]),
+                           jornadas_rec=jornadas_rec, fecha_rec=fecha_tras(jornadas_rec), tabla=tabla,
+                           figura=graficos.curva_jornadas(res, cfg, disponibles, jornadas_rec))
+
+
+def guardar_cookie_cuentas(cuentas, destino):
+    resp = make_response(redirect(destino))
+    resp.set_cookie(COOKIE_CUENTAS, _firmador().dumps(cuentas), max_age=365 * 86400, httponly=True, samesite="Lax")
+    return resp
+
+
+@app.route("/cuenta", methods=["GET", "POST"])
+@requiere("admin")
+def mi_cuenta():
+    """Solo la administradora cambia nombres, usuarios y contraseñas de ambas cuentas."""
+    if request.method == "POST":
+        objetivo = request.form.get("cuenta")
+        if objetivo not in ("admin", "usuario"):
+            return redirect(url_for("mi_cuenta"))
+        cuentas = leer_cuentas()
+        admin_actual = cuenta("admin")
+        clave_admin = request.form.get("clave_admin", "")
+        valida = (check_password_hash(admin_actual["clave_hash"], clave_admin) if admin_actual["clave_hash"]
+                  else clave_admin == admin_actual["clave"])
+        if request.form.get("accion") == "restablecer":
+            if not valida:
+                flash("Para restablecer, escriba la contraseña actual de la administradora.", "error")
+                return render_template("cuenta.html", seccion="cuenta", cuentas_vista=vista_cuentas(),
+                                       form=request.form, abierta=objetivo)
+            cuentas.pop(objetivo, None)
+            if objetivo == "admin":
+                base = next(k for k, v in USUARIOS.items() if v["rol"] == "admin")
+                session.update(usuario=base, nombre=USUARIOS[base]["nombre"])
+            flash("Se restablecieron los datos originales de la cuenta.", "ok")
+            return guardar_cookie_cuentas(cuentas, url_for("mi_cuenta"))
+
+        nombre = (request.form.get("nombre") or "").strip()[:40]
+        usuario = (request.form.get("usuario") or "").strip().lower()[:20]
+        nueva, repetida = request.form.get("clave_nueva", ""), request.form.get("clave_repetida", "")
+        errores = []
+        if not valida:
+            errores.append("La contraseña actual de la administradora no es correcta.")
+        if len(nombre) < 3:
+            errores.append("El nombre debe tener al menos 3 caracteres.")
+        if len(usuario) < 3 or not all(ch.isalnum() or ch in "._-" for ch in usuario):
+            errores.append("El usuario debe tener al menos 3 caracteres: letras, números, punto, guion o guion bajo.")
+        if usuario == cuenta("usuario" if objetivo == "admin" else "admin")["usuario"]:
+            errores.append("Ese nombre de usuario ya lo usa la otra cuenta.")
+        if nueva and len(nueva) < 6:
+            errores.append("La nueva contraseña debe tener al menos 6 caracteres.")
+        if nueva != repetida:
+            errores.append("La nueva contraseña y su confirmación no coinciden.")
+        if errores:
+            for e in errores:
+                flash(e, "error")
+            return render_template("cuenta.html", seccion="cuenta", cuentas_vista=vista_cuentas(),
+                                   form=request.form, abierta=objetivo)
+        propio = cuentas.get(objetivo, {})
+        propio.update(u=usuario, n=nombre)
+        if nueva:
+            propio["h"] = generate_password_hash(nueva)
+        cuentas[objetivo] = propio
+        if objetivo == "admin":
+            session.update(usuario=usuario, nombre=nombre)
+        etiqueta = "de la administradora" if objetivo == "admin" else "del usuario de atención al cliente"
+        flash(f"Se actualizaron los datos {etiqueta}.", "ok")
+        return guardar_cookie_cuentas(cuentas, url_for("mi_cuenta"))
+    return render_template("cuenta.html", seccion="cuenta", cuentas_vista=vista_cuentas(), form={}, abierta=None)
+
+
+def vista_cuentas():
+    return [{**cuenta("admin"), "titulo": "Administradora"},
+            {**cuenta("usuario"), "titulo": "Atención al cliente"}]
+
+
+@app.errorhandler(404)
+def no_encontrado(_):
+    return redirect(url_for("inicio"))
+
+
+if __name__ == "__main__":
+    app.run(debug=False, port=int(os.environ.get("PORT", 5000)))
